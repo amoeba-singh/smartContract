@@ -206,7 +206,7 @@ pub fn execute_use_credits(
     TRANSACTIONS.save(deps.storage, &credit_user_addr, &updated_transactions)?;
 
     Ok(Response::new()
-        .add_attribute("action", "buy_credits")
+        .add_attribute("action", "use_credits")
         .add_attribute("credits", msg.credits.to_string())
         .add_attribute("credit user", credit_user_addr.to_string()))
 }
