@@ -1,9 +1,12 @@
 pub mod contract;
-pub mod state;
+mod error;
+pub mod helpers;
 pub mod msg;
-pub mod error;
+pub mod state;
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    // We'll include tests in the individual modules
+}
 
 pub use crate::error::ContractError;

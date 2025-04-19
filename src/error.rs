@@ -1,7 +1,7 @@
 use cosmwasm_std::StdError;
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum ContractError {
     #[error("{0}")]
     Std(#[from] StdError),
@@ -9,21 +9,30 @@ pub enum ContractError {
     #[error("Unauthorized")]
     Unauthorized {},
 
-    #[error("User Already Exists")]
-    UserExists {},
+    #[error("Username '{username}' already exists")]
+    UsernameExists { username: String },
 
-    #[error("Not an Admin")]
-    NotAnAdmin {},
+    #[error("Username '{username}' not found")]
+    UsernameNotFound { username: String },
 
-    #[error("Insufficient Amount")]
-    InsufficientAmount {},
+    #[error("Username '{username}' contains invalid characters. Usernames must contain only letters, numbers, underscores, and hyphens")]
+    InvalidUsername { username: String },
 
-    #[error("User Not Found")]
-    UserNotFound {},
+    #[error("Username must be between 3 and 30 characters")]
+    UsernameTooShortOrLong {},
 
-    #[error("Invalid Amount")]
-    InvalidAmount{},
+    #[error("Cannot tip yourself")]
+    SelfTipping {},
 
-    #[error("Insufficient Credits")]
-    InsufficientCredits {},
+    #[error("Wallet address already registered with username '{username}'")]
+    WalletAlreadyRegistered { username: String },
+
+    #[error("Tip record not found")]
+    TipRecordNotFound {},
+
+    #[error("Missing or invalid field: {field}")]
+    MissingField { field: String },
+
+    #[error("Custom Error: {message}")]
+    CustomError { message: String },
 }

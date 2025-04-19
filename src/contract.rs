@@ -1,14 +1,24 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
-use cosmwasm_std::{ to_json_binary, Addr, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult};
+use cosmwasm_std::{
+    to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult, Addr,
+};
 use cw2::set_contract_version;
-
+use regex::Regex;
 
 use crate::error::ContractError;
-use crate::msg::{BuyCreditsMessage, ConfigResponse, ExecuteMsg, InstantiateMsg, QueryMsg, RegisterUserMessage, TransactionsResponse, UseCreditsMessage, UserResponse};
-use crate::state::{Config, Transaction, User, CONFIG, TRANSACTIONS, USERS};
+use crate::helpers::addr_validate;
+use crate::msg::{
+    ExecuteMsg, InstantiateMsg, QueryMsg, ProfileResponse, ProfilesResponse, TipsResponse,
+    TipDetailResponse, StatsResponse, AdminResponse, UsernameAvailableResponse,
+};
+use crate::state::{
+    UserProfile, TipRecord, USER_PROFILES, WALLET_TO_USERNAME, TIP_RECORDS, TIPS_SENT,
+    TIPS_RECEIVED, CONTRACT_ADMINS,
+};
 
-const CONTRACT_NAME: &str = "crates.io:imaginify";
+// Contract name and version info for migration
+const CONTRACT_NAME: &str = "crates.io:tipping-profiles";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -18,28 +28,22 @@ pub fn instantiate(
     info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
-    // Validate admin address from message or default to sender
-    let admin_addr = msg.admin.map_or(info.sender.clone(), |addr| {
-         deps.api.addr_validate(&addr).unwrap_or(info.sender.clone())
-    });
-
-    // Initialize contract configuration with admin address
-    let config = Config {
-        admin: admin_addr,
-    };
-
-    // Set contract version for migration purposes
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-    // Store configuration in contract storage
-    CONFIG.save(deps.storage, &config)?;
-
-    // Return successful response with initialization metadata
+    
+    // Set the initial admin
+    let admin_addr = addr_validate(deps.api, &msg.admin)?;
+    CONTRACT_ADMINS.save(deps.storage, &admin_addr, &true)?;
+    
+    // Also set the contract creator as an admin
+    if admin_addr != info.sender {
+        CONTRACT_ADMINS.save(deps.storage, &info.sender, &true)?;
+    }
+    
     Ok(Response::new()
         .add_attribute("method", "instantiate")
-        .add_attribute("admin", info.sender)
-        .add_attribute("credits", (4096*4).to_string()))
+        .add_attribute("admin", msg.admin)
+        .add_attribute("creator", info.sender))
 }
-
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn execute(
@@ -48,193 +52,529 @@ pub fn execute(
     info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
-    // Route execution to appropriate handler based on message type
     match msg {
-        ExecuteMsg::RegisterUser(msg) => execute_register_user(deps, env, info, msg),
-        ExecuteMsg::BuyCredits(msg) => execute_buy_credits(deps, env, info, msg),
-        ExecuteMsg::UseCredits(msg) => execute_use_credits(deps, env, info, msg),
+        ExecuteMsg::RegisterProfile {
+            username,
+            name,
+            bio,
+            profile_picture,
+            banner_image,
+            twitter,
+            website,
+        } => execute_register_profile(
+            deps, 
+            env, 
+            info, 
+            username, 
+            name, 
+            bio, 
+            profile_picture, 
+            banner_image, 
+            twitter, 
+            website,
+        ),
+        
+        ExecuteMsg::UpdateProfile {
+            username,
+            name,
+            bio,
+            profile_picture,
+            banner_image,
+            twitter,
+            website,
+        } => execute_update_profile(
+            deps, 
+            env, 
+            info, 
+            username, 
+            name, 
+            bio, 
+            profile_picture, 
+            banner_image, 
+            twitter, 
+            website,
+        ),
+        
+        ExecuteMsg::RecordTip {
+            to_username,
+            amount,
+            message,
+        } => execute_record_tip(deps, env, info, to_username, amount, message),
+        
+        ExecuteMsg::AddAdmin { admin } => execute_add_admin(deps, info, admin),
+        
+        ExecuteMsg::RemoveAdmin { admin } => execute_remove_admin(deps, info, admin),
     }
 }
 
-pub fn execute_register_user(
+fn execute_register_profile(
     deps: DepsMut,
-    _env: Env,
-    info:MessageInfo,
-    _msg: RegisterUserMessage,
+    env: Env,
+    info: MessageInfo,
+    username: String,
+    name: String,
+    bio: Option<String>,
+    profile_picture: Option<String>,
+    banner_image: Option<String>,
+    twitter: Option<String>,
+    website: Option<String>,
 ) -> Result<Response, ContractError> {
-    let user_addr = info.sender.clone();
-    if USERS.has(deps.storage, &user_addr) {
-        return Err(ContractError::UserExists {});
+    // Validate username format
+    validate_username(&username)?;
+    
+    // Check if username is already taken
+    if USER_PROFILES.has(deps.storage, &username) {
+        return Err(ContractError::UsernameExists { username });
     }
-
-    let new_user = User {
-        credit_balance: 10,
+    
+    // Check if the wallet is already registered
+    if WALLET_TO_USERNAME.has(deps.storage, &info.sender) {
+        let existing_username = WALLET_TO_USERNAME.load(deps.storage, &info.sender)?;
+        return Err(ContractError::WalletAlreadyRegistered { username: existing_username });
+    }
+    
+    // Create and save the new profile
+    let profile = UserProfile {
+        username: username.clone(),
+        name,
+        bio,
+        profile_picture,
+        banner_image,
+        twitter,
+        website,
+        wallet_address: info.sender.clone(),
+        created_at: env.block.time,
+        updated_at: env.block.time,
     };
-
-    USERS.save(deps.storage, &user_addr, &new_user)?;
-
+    
+    USER_PROFILES.save(deps.storage, &username, &profile)?;
+    WALLET_TO_USERNAME.save(deps.storage, &info.sender, &username)?;
+    
     Ok(Response::new()
-        .add_attribute("action", "register_user")
-        .add_attribute("user", user_addr.to_string()))
+        .add_attribute("method", "register_profile")
+        .add_attribute("username", username)
+        .add_attribute("wallet", info.sender))
 }
 
-
-pub fn execute_buy_credits(
+fn execute_update_profile(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    msg: BuyCreditsMessage
-) -> Result<Response, ContractError> 
-{
-
-    let buyer_addr = info.sender.clone();
-    
-    let credits_to_be_added: u128;
-    
-    let mut user = USERS.load(deps.storage, &buyer_addr)
-        .map_err(|_| ContractError::UserNotFound {})?;
-
-
-    if msg.bundle == "Basic" {
-        credits_to_be_added = 10;
-        let amount_required = 0.01;
-        
-        let payment = info.funds
-            .iter()
-            .find(|coin| coin.denom == "uxion") 
-            .ok_or_else(|| ContractError::InsufficientAmount {})?;
-
-        let required_amount = (amount_required * 1_000_000.0) as u128;
-        
-        if payment.amount.u128() < required_amount {
-            return Err(ContractError::InsufficientAmount {});
-        }
+    username: String,
+    name: Option<String>,
+    bio: Option<String>,
+    profile_picture: Option<String>,
+    banner_image: Option<String>,
+    twitter: Option<String>,
+    website: Option<String>,
+) -> Result<Response, ContractError> {
+    // Check if profile exists
+    if !USER_PROFILES.has(deps.storage, &username) {
+        return Err(ContractError::UsernameNotFound { username });
     }
     
-    else if msg.bundle == "Pro" {
-        credits_to_be_added = 25;
-        let amount_required = 0.02;
-        
-        let payment = info.funds
-            .iter()
-            .find(|coin| coin.denom == "uxion") 
-            .ok_or_else(|| ContractError::InsufficientAmount {})?;
-
-        let required_amount = (amount_required * 1_000_000.0) as u128;
-        
-        if payment.amount.u128() < required_amount {
-            return Err(ContractError::InsufficientAmount {});
-        }
-    }
-    else if msg.bundle == "Premium" {
-        credits_to_be_added = 100;
-        let amount_required = 0.04;
-        
-        let payment = info.funds
-            .iter()
-            .find(|coin| coin.denom == "uxion") 
-            .ok_or_else(|| ContractError::InsufficientAmount {})?;
-
-        let required_amount = (amount_required * 1_000_000.0) as u128;
-        
-        if payment.amount.u128() < required_amount {
-            return Err(ContractError::InsufficientAmount {});
-        }
-    }
-    else {
-        return Err(ContractError::InvalidAmount {});
-    }
-
-    user.credit_balance += credits_to_be_added;
-    USERS.save(deps.storage, &buyer_addr, &user)?;
+    // Load the profile
+    let mut profile = USER_PROFILES.load(deps.storage, &username)?;
     
-    let new_transaction = Transaction {
-        credits: credits_to_be_added,
-        label: String::from("BOUGHT"),
-        timestamp: env.block.time.seconds() as u128,
-        amount_used: 0,
-    };
+    // Check authorization - only the owner or an admin can update the profile
+    if profile.wallet_address != info.sender && !is_admin(deps.as_ref(), &info.sender)? {
+        return Err(ContractError::Unauthorized {});
+    }
     
-    let transactions = TRANSACTIONS.may_load(deps.storage, &buyer_addr)?.unwrap_or_default();
-
-    let mut updated_transactions = transactions;
-    updated_transactions.push(new_transaction);
-
-    TRANSACTIONS.save(deps.storage, &buyer_addr, &updated_transactions)?;
-
-
+    // Update fields if provided
+    if let Some(new_name) = name {
+        profile.name = new_name;
+    }
+    
+    if let Some(new_bio) = bio {
+        profile.bio = Some(new_bio);
+    }
+    
+    if let Some(new_picture) = profile_picture {
+        profile.profile_picture = Some(new_picture);
+    }
+    
+    if let Some(new_banner) = banner_image {
+        profile.banner_image = Some(new_banner);
+    }
+    
+    if let Some(new_twitter) = twitter {
+        profile.twitter = Some(new_twitter);
+    }
+    
+    if let Some(new_website) = website {
+        profile.website = Some(new_website);
+    }
+    
+    profile.updated_at = env.block.time;
+    
+    // Save updated profile
+    USER_PROFILES.save(deps.storage, &username, &profile)?;
+    
     Ok(Response::new()
-        .add_attribute("action", "buy_credits")
-        .add_attribute("credits", user.credit_balance.to_string())
-        .add_attribute("buyer", buyer_addr.to_string()))
+        .add_attribute("method", "update_profile")
+        .add_attribute("username", username))
 }
 
-pub fn execute_use_credits(
+fn execute_record_tip(
     deps: DepsMut,
     env: Env,
     info: MessageInfo,
-    msg: UseCreditsMessage
-) -> Result<Response, ContractError> 
-{
-    let credit_user_addr = info.sender.clone();
-
-
-
-    let mut user = USERS.load(deps.storage, &credit_user_addr)
-        .map_err(|_| ContractError::UserNotFound {})?;
-
-    if user.credit_balance < msg.credits  {
-        return Err(ContractError::InsufficientCredits {});
-    }
-
-    user.credit_balance -= msg.credits;
-
-    USERS.save(deps.storage, &credit_user_addr, &user)?;
-
-    let new_transaction = Transaction {
-        credits: msg.credits,
-        label: String::from("USED"),
-        timestamp: env.block.time.seconds() as u128,
-        amount_used: 0,
+    to_username: String,
+    amount: String,
+    message: Option<String>,
+) -> Result<Response, ContractError> {
+    // Get sender's username
+    let from_username = match WALLET_TO_USERNAME.may_load(deps.storage, &info.sender)? {
+        Some(username) => username,
+        None => return Err(ContractError::CustomError {
+            message: "Sender wallet address not registered with a profile".to_string(),
+        }),
     };
     
-    let transactions = TRANSACTIONS.may_load(deps.storage, &credit_user_addr)?.unwrap_or_default();
-
-    let mut updated_transactions = transactions;
-    updated_transactions.push(new_transaction);
-
-    TRANSACTIONS.save(deps.storage, &credit_user_addr, &updated_transactions)?;
-
+    // Check that sender is not tipping themselves
+    if from_username == to_username {
+        return Err(ContractError::SelfTipping {});
+    }
+    
+    // Check if recipient exists
+    if !USER_PROFILES.has(deps.storage, &to_username) {
+        return Err(ContractError::UsernameNotFound { username: to_username });
+    }
+    
+    // Create tip record
+    let timestamp = env.block.time;
+    let tip = TipRecord {
+        from_username: from_username.clone(),
+        to_username: to_username.clone(),
+        amount,
+        message,
+        timestamp,
+    };
+    
+    // Create a composite key
+    let tip_key = format!("{}:{}:{}", from_username, to_username, timestamp.nanos());
+    
+    // Save tip record
+    TIP_RECORDS.save(deps.storage, &tip_key, &tip)?;
+    
+    // Update tips sent for sender
+    let mut sender_tips = TIPS_SENT.may_load(deps.storage, &from_username)?.unwrap_or_default();
+    sender_tips.push((to_username.clone(), tip_key.clone()));
+    TIPS_SENT.save(deps.storage, &from_username, &sender_tips)?;
+    
+    // Update tips received for recipient
+    let mut recipient_tips = TIPS_RECEIVED.may_load(deps.storage, &to_username)?.unwrap_or_default();
+    recipient_tips.push((from_username.clone(), tip_key));
+    TIPS_RECEIVED.save(deps.storage, &to_username, &recipient_tips)?;
+    
     Ok(Response::new()
-        .add_attribute("action", "use_credits")
-        .add_attribute("credits", msg.credits.to_string())
-        .add_attribute("credit user", credit_user_addr.to_string()))
+        .add_attribute("method", "record_tip")
+        .add_attribute("from", from_username)
+        .add_attribute("to", to_username)
+        .add_attribute("timestamp", timestamp.to_string()))
 }
 
+fn execute_add_admin(
+    deps: DepsMut,
+    info: MessageInfo,
+    admin: String,
+) -> Result<Response, ContractError> {
+    // Check if sender is admin
+    if !is_admin(deps.as_ref(), &info.sender)? {
+        return Err(ContractError::Unauthorized {});
+    }
+    
+    // Validate and add new admin
+    let admin_addr = addr_validate(deps.api, &admin)?;
+    CONTRACT_ADMINS.save(deps.storage, &admin_addr, &true)?;
+    
+    Ok(Response::new()
+        .add_attribute("method", "add_admin")
+        .add_attribute("admin", admin))
+}
+
+fn execute_remove_admin(
+    deps: DepsMut,
+    info: MessageInfo,
+    admin: String,
+) -> Result<Response, ContractError> {
+    // Check if sender is admin
+    if !is_admin(deps.as_ref(), &info.sender)? {
+        return Err(ContractError::Unauthorized {});
+    }
+    
+    // Validate admin address
+    let admin_addr = addr_validate(deps.api, &admin)?;
+    
+    // Prevent removing the last admin
+    let is_last_admin = CONTRACT_ADMINS
+        .keys(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+        .count() <= 1;
+    
+    if is_last_admin {
+        return Err(ContractError::CustomError {
+            message: "Cannot remove the last admin".to_string(),
+        });
+    }
+    
+    CONTRACT_ADMINS.remove(deps.storage, &admin_addr);
+    
+    Ok(Response::new()
+        .add_attribute("method", "remove_admin")
+        .add_attribute("admin", admin))
+}
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn query(
-    deps: Deps,
-    _env: Env,
-    msg: QueryMsg,
-) -> StdResult<Binary> {
+pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
-        QueryMsg::GetConfig {} => query_config(deps),
-        QueryMsg::GetUser { address } => query_user(deps, address),
-        QueryMsg::GetTransactions { address } => query_transactions(deps, address)
+        QueryMsg::GetProfile { username } => to_json_binary(&query_profile(deps, username)?),
+        QueryMsg::GetProfileByWallet { wallet } => to_json_binary(&query_profile_by_wallet(deps, wallet)?),
+        QueryMsg::ListProfiles { limit, start_after } => to_json_binary(&query_list_profiles(deps, limit, start_after)?),
+        QueryMsg::GetTipsSent { username, limit, start_after } => to_json_binary(&query_tips_sent(deps, username, limit, start_after)?),
+        QueryMsg::GetTipsReceived { username, limit, start_after } => to_json_binary(&query_tips_received(deps, username, limit, start_after)?),
+        QueryMsg::GetTipDetail { from_username, to_username, timestamp } => to_json_binary(&query_tip_detail(deps, from_username, to_username, timestamp)?),
+        QueryMsg::GetUserStats { username } => to_json_binary(&query_user_stats(deps, username)?),
+        QueryMsg::IsAdmin { address } => to_json_binary(&query_is_admin(deps, address)?),
+        QueryMsg::IsUsernameAvailable { username } => to_json_binary(&query_is_username_available(deps, username)?),
     }
 }
-fn query_config(deps: Deps) -> StdResult<Binary> {
-    let config = CONFIG.load(deps.storage)?;
-    to_json_binary(&ConfigResponse { config })
+
+fn query_profile(deps: Deps, username: String) -> StdResult<ProfileResponse> {
+    let profile = USER_PROFILES.may_load(deps.storage, &username)?;
+    Ok(ProfileResponse { profile })
 }
 
-fn query_user(deps: Deps, address: Addr) -> StdResult<Binary> {
-    let user = USERS.load(deps.storage, &address)?;
-    to_json_binary(&UserResponse { user })
+fn query_profile_by_wallet(deps: Deps, wallet: String) -> StdResult<ProfileResponse> {
+    let addr = deps.api.addr_validate(&wallet)?;
+    
+    // Get username associated with this wallet
+    let username = match WALLET_TO_USERNAME.may_load(deps.storage, &addr)? {
+        Some(username) => username,
+        None => return Ok(ProfileResponse { profile: None }),
+    };
+    
+    let profile = USER_PROFILES.may_load(deps.storage, &username)?;
+    Ok(ProfileResponse { profile })
 }
 
-fn query_transactions(deps: Deps, address: Addr) -> StdResult<Binary> {
-    let transactions = TRANSACTIONS.load(deps.storage, &address)?;
-    to_json_binary(&TransactionsResponse { transactions })
+fn query_list_profiles(
+    deps: Deps,
+    limit: Option<u32>,
+    start_after: Option<String>,
+) -> StdResult<ProfilesResponse> {
+    let limit = limit.unwrap_or(30) as usize;
+    
+    // Get all profiles
+    let all_profiles: StdResult<Vec<UserProfile>> = USER_PROFILES
+        .range(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+        .map(|item| {
+            let (_, profile) = item?;
+            Ok(profile)
+        })
+        .collect();
+    
+    // Filter and limit profiles
+    let profiles = all_profiles?
+        .into_iter()
+        .filter(|p| if let Some(ref start) = start_after {
+            p.username > *start
+        } else {
+            true
+        })
+        .take(limit)
+        .collect();
+    
+    Ok(ProfilesResponse { profiles })
+}
+
+fn query_tips_sent(
+    deps: Deps,
+    username: String,
+    limit: Option<u32>,
+    start_after: Option<String>,
+) -> StdResult<TipsResponse> {
+    // Check if user exists
+    if !USER_PROFILES.has(deps.storage, &username) {
+        return Ok(TipsResponse { tips: Vec::new() });
+    }
+    
+    let limit = limit.unwrap_or(30) as usize;
+    
+    // Get all tip references for this sender
+    let tip_refs = TIPS_SENT.may_load(deps.storage, &username)?.unwrap_or_default();
+    
+    // Filter by start_after if provided
+    let filtered_refs = if let Some(after_key) = start_after {
+        tip_refs
+            .into_iter()
+            .filter(|(_, key)| key > &after_key)
+            .collect::<Vec<_>>()
+    } else {
+        tip_refs
+    };
+    
+    // Sort by key (which contains timestamp) - newest first
+    let mut sorted_refs = filtered_refs;
+    sorted_refs.sort_by(|a, b| b.1.cmp(&a.1));
+    
+    // Take up to limit
+    let limited_refs = sorted_refs.into_iter().take(limit).collect::<Vec<_>>();
+    
+    // Retrieve the actual tip records
+    let mut tips = Vec::new();
+    for (_, tip_key) in limited_refs {
+        if let Ok(tip) = TIP_RECORDS.load(deps.storage, &tip_key) {
+            tips.push(tip);
+        }
+    }
+    
+    Ok(TipsResponse { tips })
+}
+
+fn query_tips_received(
+    deps: Deps,
+    username: String,
+    limit: Option<u32>,
+    start_after: Option<String>,
+) -> StdResult<TipsResponse> {
+    // Check if user exists
+    if !USER_PROFILES.has(deps.storage, &username) {
+        return Ok(TipsResponse { tips: Vec::new() });
+    }
+    
+    let limit = limit.unwrap_or(30) as usize;
+    
+    // Get all tip references for this recipient
+    let tip_refs = TIPS_RECEIVED.may_load(deps.storage, &username)?.unwrap_or_default();
+    
+    // Filter by start_after if provided
+    let filtered_refs = if let Some(after_key) = start_after {
+        tip_refs
+            .into_iter()
+            .filter(|(_, key)| key > &after_key)
+            .collect::<Vec<_>>()
+    } else {
+        tip_refs
+    };
+    
+    // Sort by key (which contains timestamp) - newest first
+    let mut sorted_refs = filtered_refs;
+    sorted_refs.sort_by(|a, b| b.1.cmp(&a.1));
+    
+    // Take up to limit
+    let limited_refs = sorted_refs.into_iter().take(limit).collect::<Vec<_>>();
+    
+    // Retrieve the actual tip records
+    let mut tips = Vec::new();
+    for (_, tip_key) in limited_refs {
+        if let Ok(tip) = TIP_RECORDS.load(deps.storage, &tip_key) {
+            tips.push(tip);
+        }
+    }
+    
+    Ok(TipsResponse { tips })
+}
+
+fn query_tip_detail(
+    deps: Deps,
+    from_username: String,
+    to_username: String,
+    timestamp: cosmwasm_std::Timestamp,
+) -> StdResult<TipDetailResponse> {
+    let key = format!("{}:{}:{}", from_username, to_username, timestamp.nanos());
+    let tip = TIP_RECORDS.may_load(deps.storage, &key)?;
+    Ok(TipDetailResponse { tip })
+}
+
+fn query_user_stats(deps: Deps, username: String) -> StdResult<StatsResponse> {
+    // Check if user exists
+    if !USER_PROFILES.has(deps.storage, &username) {
+        return Ok(StatsResponse {
+            total_tips_sent: 0,
+            total_tips_received: 0,
+            total_amount_sent: "0uxion".to_string(),
+            total_amount_received: "0uxion".to_string(),
+        });
+    }
+    
+    // Get all tips sent
+    let tips_sent = TIPS_SENT.may_load(deps.storage, &username)?.unwrap_or_default();
+    let total_tips_sent = tips_sent.len() as u64;
+    
+    // Get all tips received
+    let tips_received = TIPS_RECEIVED.may_load(deps.storage, &username)?.unwrap_or_default();
+    let total_tips_received = tips_received.len() as u64;
+    
+    // Calculate total amount sent
+    let mut total_amount_sent = 0u128;
+    for (_, tip_key) in &tips_sent {
+        if let Ok(tip) = TIP_RECORDS.load(deps.storage, tip_key) {
+            if let Some(amount_str) = tip.amount.strip_suffix("uxion") {
+                if let Ok(amount) = amount_str.parse::<u128>() {
+                    total_amount_sent += amount;
+                }
+            }
+        }
+    }
+    
+    // Calculate total amount received
+    let mut total_amount_received = 0u128;
+    for (_, tip_key) in &tips_received {
+        if let Ok(tip) = TIP_RECORDS.load(deps.storage, tip_key) {
+            if let Some(amount_str) = tip.amount.strip_suffix("uxion") {
+                if let Ok(amount) = amount_str.parse::<u128>() {
+                    total_amount_received += amount;
+                }
+            }
+        }
+    }
+    
+    Ok(StatsResponse {
+        total_tips_sent,
+        total_tips_received,
+        total_amount_sent: format!("{}uxion", total_amount_sent),
+        total_amount_received: format!("{}uxion", total_amount_received),
+    })
+}
+
+fn query_is_admin(deps: Deps, address: String) -> StdResult<AdminResponse> {
+    let addr = deps.api.addr_validate(&address)?;
+    let is_admin = CONTRACT_ADMINS.may_load(deps.storage, &addr)?.unwrap_or(false);
+    Ok(AdminResponse { is_admin })
+}
+
+fn query_is_username_available(deps: Deps, username: String) -> StdResult<UsernameAvailableResponse> {
+    // Check if valid username format
+    let is_valid = match validate_username(&username) {
+        Ok(_) => true,
+        Err(_) => false,
+    };
+    
+    // Check if already taken
+    let is_available = is_valid && !USER_PROFILES.has(deps.storage, &username);
+    
+    Ok(UsernameAvailableResponse { is_available })
+}
+
+// Helper function to validate username format
+fn validate_username(username: &str) -> Result<(), ContractError> {
+    if username.len() < 3 || username.len() > 30 {
+        return Err(ContractError::UsernameTooShortOrLong {});
+    }
+    
+    // Username can only contain letters, numbers, underscores, and hyphens
+    let re = Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap();
+    if !re.is_match(username) {
+        return Err(ContractError::InvalidUsername {
+            username: username.to_string(),
+        });
+    }
+    
+    Ok(())
+}
+
+// Helper function to check if an address is an admin
+fn is_admin(deps: Deps, addr: &Addr) -> StdResult<bool> {
+    Ok(CONTRACT_ADMINS.may_load(deps.storage, addr)?.unwrap_or(false))
 }

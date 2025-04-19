@@ -1,72 +1,149 @@
-use cosmwasm_schema::cw_serde;
-use cosmwasm_std::Addr;use crate::state::{User, Config, Transaction};
+use cosmwasm_schema::{cw_serde, QueryResponses};
+use cosmwasm_std::Timestamp;
 
-/// Initial configuration message for contract instantiation
-/// Allows setting an optional admin address with special privileges
+use crate::state::{UserProfile, TipRecord};
+
 #[cw_serde]
 pub struct InstantiateMsg {
-    pub admin: Option<String>,  
+    pub admin: String, // Initial admin address
 }
 
-/// Message for registering new users in the platform
-/// Currently takes no parameters as registration is based on sender address
-#[cw_serde]
-pub struct RegisterUserMessage {}
-
-/// Message for purchasing credit bundles of different types
-/// The bundle parameter identifies which credit package to purchase
-#[cw_serde]
-pub struct BuyCreditsMessage {
-    pub bundle: String,
-}
-
-/// Message for spending credits on platform services
-/// Specifies the number of credits to consume
-#[cw_serde]
-pub struct UseCreditsMessage {
-    pub credits: u128,
-}
-
-/// Detailed transaction information for recording credit operations
-/// Includes metadata about the transaction type, timing, and amounts
-#[cw_serde]
-pub struct TransactionMessage {
-    pub credits: u128,
-    pub label: String,
-    pub timestamp: u128,
-    pub amount_used: u128,
-}
-
-/// Contract executable messages that trigger state changes
 #[cw_serde]
 pub enum ExecuteMsg {
-    RegisterUser(RegisterUserMessage),
-    BuyCredits(BuyCreditsMessage),
-    UseCredits(UseCreditsMessage),
+    // User profile management
+    RegisterProfile {
+        username: String,
+        name: String,
+        bio: Option<String>,
+        profile_picture: Option<String>,
+        banner_image: Option<String>,
+        twitter: Option<String>,
+        website: Option<String>,
+    },
+    
+    UpdateProfile {
+        username: String,
+        name: Option<String>,
+        bio: Option<String>,
+        profile_picture: Option<String>,
+        banner_image: Option<String>,
+        twitter: Option<String>,
+        website: Option<String>,
+    },
+    
+    // Tip recording functionality
+    RecordTip {
+        to_username: String,
+        amount: String,
+        message: Option<String>,
+    },
+    
+    // Admin management
+    AddAdmin {
+        admin: String,
+    },
+    
+    RemoveAdmin {
+        admin: String,
+    },
 }
 
-/// Query messages for reading contract state without modifications
 #[cw_serde]
+#[derive(QueryResponses)]
 pub enum QueryMsg {
-    GetConfig {},
-    GetUser { address: Addr },
-    GetTransactions { address: Addr },
+    // User profile queries
+    #[returns(ProfileResponse)]
+    GetProfile { 
+        username: String 
+    },
+    
+    #[returns(ProfileResponse)]
+    GetProfileByWallet { 
+        wallet: String 
+    },
+    
+    #[returns(ProfilesResponse)]
+    ListProfiles { 
+        limit: Option<u32>,
+        start_after: Option<String>,
+    },
+    
+    // Tip queries
+    #[returns(TipsResponse)]
+    GetTipsSent { 
+        username: String,
+        limit: Option<u32>,
+        start_after: Option<String>,
+    },
+    
+    #[returns(TipsResponse)]
+    GetTipsReceived { 
+        username: String,
+        limit: Option<u32>,
+        start_after: Option<String>,
+    },
+    
+    #[returns(TipDetailResponse)]
+    GetTipDetail { 
+        from_username: String,
+        to_username: String,
+        timestamp: Timestamp,
+    },
+    
+    // Statistics
+    #[returns(StatsResponse)]
+    GetUserStats {
+        username: String,
+    },
+    
+    // Admin check
+    #[returns(AdminResponse)]
+    IsAdmin { 
+        address: String,
+    },
+    
+    // Utility
+    #[returns(UsernameAvailableResponse)]
+    IsUsernameAvailable {
+        username: String,
+    },
 }
 
-/// Response wrapper for contract configuration information
+// Response types
 #[cw_serde]
-pub struct ConfigResponse {
-    pub config: Config,
+pub struct ProfileResponse {
+    pub profile: Option<UserProfile>,
 }
 
-/// Response wrapper for user account information
 #[cw_serde]
-pub struct UserResponse {
-    pub  user:User
+pub struct ProfilesResponse {
+    pub profiles: Vec<UserProfile>,
 }
 
-/// Response wrapper for transaction history lookup
 #[cw_serde]
-pub struct TransactionsResponse {
-    pub transactions: Vec<Transaction>,
+pub struct TipsResponse {
+    pub tips: Vec<TipRecord>,
+}
+
+#[cw_serde]
+pub struct TipDetailResponse {
+    pub tip: Option<TipRecord>,
+}
+
+#[cw_serde]
+pub struct StatsResponse {
+    pub total_tips_sent: u64,
+    pub total_tips_received: u64,
+    pub total_amount_sent: String,
+    pub total_amount_received: String,
+}
+
+#[cw_serde]
+pub struct AdminResponse {
+    pub is_admin: bool,
+}
+
+#[cw_serde]
+pub struct UsernameAvailableResponse {
+    pub is_available: bool,
 }
